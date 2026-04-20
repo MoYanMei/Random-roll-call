@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>课堂随机点名助手</title>
+    <!-- 引入外部库：React, Babel, Tailwind, Lucide Icons, SheetJS, Confetti -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;900&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Noto Sans SC', sans-serif;
+            background-color: #F0F7FF;
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            overflow: hidden; /* 禁止全屏滚动 */
+        }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        
+        @keyframes bounce-subtle {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-10px); }
+        }
+        .animate-bounce-subtle { animation: bounce-subtle 1.5s ease-in-out infinite; }
+        
+        /* 针对点击态的平滑缩放 */
+        .active-scale:active { transform: scale(0.95); }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        const Icon = ({ name, size = 24, className = "" }) => {
+            const iconRef = useRef(null);
+            useEffect(() => {
+                if (iconRef.current) {
+                    lucide.createIcons({
+                        icons: { [name]: lucide.icons[name] },
+                        attrs: {
+                            'stroke-width': 2.5,
+                            'width': size,
+                            'height': size,
+                            'class': className
+                        },
+                        nameAttr: 'data-lucide'
+                    });
+                }
+            }, [name, size, className]);
+            return <i ref={iconRef} data-lucide={name}></i>;
+        };
+
+        const App = () => {
+            const [students, setStudents] = useState([]); 
+            const [pool, setPool] = useState([]); 
+            const [history, setHistory] = useState([]); 
+            const [currentName, setCurrentName] = useState('准备就绪');
+            const [isPicking, setIsPicking] = useState(false);
+            const [allowRepeating, setAllowRepeating] = useState(false); 
+            
+            const [showSettings, setShowSettings] = useState(false);
+            const [showColumnPicker, setShowColumnPicker] = useState(false);
+            const [showOverwriteConfirm, setShowOverwriteConfirm] = useState(false);
+            const [excelPreview, setExcelPreview] = useState({ headers: [], rows: [] });
+            const [pendingList, setPendingList] = useState([]); 
+            const [rawInput, setRawInput] = useState('');
+            
+            const fileInputRef = useRef(null);
+            const audioCtx = useRef(null);
+
+            const playTick = () => {
+                if (!audioCtx.current) audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
+                const osc = audioCtx.current.createOscillator();
+                const gain = audioCtx.current.createGain();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(200, audioCtx.current.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(50, audioCtx.current.currentTime + 0.1);
+                gain.gain.setValueAtTime(0.05, audioCtx.current.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.current.currentTime + 0.1);
+                osc.connect(gain);
+                gain.connect(audioCtx.current.destination);
+                osc.start();
+                osc.stop(audioCtx.current.currentTime + 0.1);
+            };
+
+            const playSuccess = () => {
+                if (!audioCtx.current) audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
+                const notes = [523.25, 659.25, 783.99, 1046.50];
+                notes.forEach((freq, i) => {
+                    const osc = audioCtx.current.createOscillator();
+                    const gain = audioCtx.current.createGain();
+                    osc.frequency.setValueAtTime(freq, audioCtx.current.currentTime + i * 0.05);
+                    gain.gain.setValueAtTime(0.08, audioCtx.current.currentTime + i * 0.05);
+                    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.current.currentTime + i * 0.05 + 0.5);
+                    osc.connect(gain);
+                    gain.connect(audioCtx.current.destination);
+                    osc.start(audioCtx.current.currentTime + i * 0.05);
+                    osc.stop(audioCtx.current.currentTime + i * 0.05 + 0.5);
+                });
+            };
+
+            useEffect(() => {
+                const saved = localStorage.getItem('class_picker_data_v5');
+                if (saved) {
+                    const data = JSON.parse(saved);
+                    setStudents(data.students || []);
+                    setPool(data.students || []);
+                    setRawInput((data.students || []).join('\n'));
+                }
+            }, []);
+
+            useEffect(() => {
+                localStorage.setItem('class_picker_data_v5', JSON.stringify({ students }));
+                if (!isPicking && !allowRepeating) setPool(students);
+            }, [students, allowRepeating]);
+
+            const startPicking = () => {
+                if (isPicking || students.length === 0) return;
+                let currentPool = allowRepeating ? students : pool;
+                if (!allowRepeating && currentPool.length === 0) {
+                    setPool([...students]);
+                    currentPool = [...students];
+                }
+                setIsPicking(true);
+                let duration = 2200;
+                let interval = 40;
+                const startTime = Date.now();
+                const roll = () => {
+                    const elapsed = Date.now() - startTime;
+                    const randomIndex = Math.floor(Math.random() * currentPool.length);
+                    setCurrentName(currentPool[randomIndex]);
+                    playTick();
+                    if (elapsed < duration) {
+                        interval = 40 + Math.pow(elapsed / duration, 2) * 280;
+                        setTimeout(roll, interval);
+                    } else {
+                        finalizePick(currentPool, randomIndex);
+                    }
+                };
+                roll();
+            };
+
+            const finalizePick = (currentPool, index) => {
+                const winner = currentPool[index];
+                setCurrentName(winner);
+                setIsPicking(false);
+                playSuccess();
+                if (window.confetti) {
+                    window.confetti({ 
+                        particleCount: 160, spread: 70, origin: { y: 0.5 },
+                        colors: ['#4D96FF', '#6BCB77', '#FFD93D', '#FF6B6B']
+                    });
+                }
+                setHistory(prev => [winner, ...prev].slice(0, 10));
+                if (!allowRepeating) {
+                    setPool(currentPool.filter((_, i) => i !== index));
+                }
+            };
+
+            const executeApplyList = (newList, mode) => {
+                let finalStudents = mode === 'append' ? [...students, ...newList] : [...newList];
+                finalStudents = Array.from(new Set(finalStudents));
+                setStudents(finalStudents);
+                setPool(finalStudents);
+                setRawInput(finalStudents.join('\n'));
+                setShowOverwriteConfirm(false);
+                setPendingList([]);
+                if (fileInputRef.current) fileInputRef.current.value = '';
+            };
+
+            const handleFileUpload = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (evt) => {
+                    const bstr = evt.target.result;
+                    const wb = XLSX.read(bstr, { type: 'binary' });
+                    const ws = wb.Sheets[wb.SheetNames[0]];
+                    const data = XLSX.utils.sheet_to_json(ws, { header: 1 });
+                    if (data.length === 0) return;
+                    const headers = data[0];
+                    const rows = data.slice(1, 6); 
+                    const nameIdx = headers.findIndex(h => /姓名|name|学生|名/i.test(String(h)));
+                    if (nameIdx !== -1) {
+                        const list = data.slice(1).map(r => r[nameIdx]).filter(Boolean).map(String);
+                        if (students.length > 0) { setPendingList(list); setShowOverwriteConfirm(true); }
+                        else { executeApplyList(list, 'overwrite'); }
+                    } else {
+                        setExcelPreview({ headers, rows, fullData: data });
+                        setShowColumnPicker(true);
+                    }
+                };
+                reader.readAsBinaryString(file);
+            };
+
+            const requestUpdateList = (list) => {
+                if (students.length > 0) { setPendingList(list); setShowOverwriteConfirm(true); }
+                else { executeApplyList(list, 'overwrite'); }
+            };
+
+            return (
+                <div className="h-screen w-screen flex flex-col items-center justify-between p-[3vh] overflow-hidden selection:bg-blue-100">
+                    
+                    {/* Header: 高度约 8vh */}
+                    <header className="w-full max-w-6xl h-[8vh] flex justify-between items-center px-4">
+                        <div className="flex items-center gap-3">
+                            <div className="bg-gradient-to-br from-blue-500 to-blue-600 p-2 rounded-xl shadow-lg shadow-blue-100">
+                                <Icon name="Sparkles" className="text-white" size={24} />
+                            </div>
+                            <h1 className="text-xl md:text-2xl font-black text-slate-800">课堂随机点名助手</h1>
+                        </div>
+                        <button onClick={() => setShowSettings(true)} className="flex items-center gap-2 px-5 py-2 bg-white rounded-2xl shadow-sm hover:shadow-md transition-all text-sm font-black text-blue-600 active-scale">
+                            <Icon name="Settings" size={18} /> 名单设置
+                        </button>
+                    </header>
+
+                    {/* Main Content Area: 重新分配垂直比例 */}
+                    <main className="flex-1 w-full flex flex-col items-center justify-center space-y-[4vh]">
+                        
+                        {/* 展示模块: 减小高度，占比约 35% */}
+                        <div className="w-full max-w-4xl h-[32vh] bg-white rounded-[2.5rem] shadow-[0_10px_30px_rgba(0,0,0,0.03)] flex flex-col items-center justify-center p-6 relative overflow-hidden group border border-slate-50">
+                            {/* 氛围背景饰品 */}
+                            <div className="absolute top-0 right-0 w-32 h-32 bg-blue-50 rounded-full translate-x-1/2 -translate-y-1/2 opacity-30"></div>
+                            
+                            <div className="text-[1.3vh] uppercase tracking-[0.3em] text-slate-300 mb-2 font-black">
+                                {isPicking ? '✨ 惊喜即将诞生 ✨' : allowRepeating ? '🔄 模式：允许重复抽取' : `🎒 待抽人数: ${pool.length} / ${students.length}`}
+                            </div>
+                            
+                            <div className={`text-[10vh] font-black text-center transition-all duration-75 leading-tight ${isPicking ? 'scale-90 blur-[2px] opacity-40 text-slate-700' : 'scale-100 blur-0 text-blue-500'}`}>
+                                {currentName}
+                            </div>
+
+                            {!isPicking && currentName !== '准备就绪' && (
+                                <div className="mt-4 px-5 py-1.5 bg-[#E3F9E5] text-[#2DB34A] rounded-2xl text-[1.6vh] font-black flex items-center gap-2 animate-bounce-subtle">
+                                    <Icon name="CheckCircle2" size={18} /> 恭喜这位同学
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Controls: 增大尺寸，占比约 45% */}
+                        <div className="flex flex-col items-center gap-[4vh]">
+                            {/* 显著增大的开始按钮 */}
+                            <button 
+                                onClick={startPicking} 
+                                disabled={isPicking || students.length === 0} 
+                                className={`group relative flex items-center justify-center w-[15vh] h-[15vh] rounded-full transition-all active-scale ${isPicking || students.length === 0 ? 'bg-slate-200 cursor-not-allowed opacity-50' : 'bg-gradient-to-tr from-blue-600 to-blue-400 shadow-[0_15px_35px_rgba(59,130,246,0.35)] hover:shadow-[0_20px_45px_rgba(59,130,246,0.45)]'}`}
+                            >
+                                <Icon name="Play" size={64} className="text-white fill-white" />
+                                <div className="absolute -inset-2 bg-blue-400/20 rounded-full animate-ping opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                            </button>
+
+                            {/* 增大的状态栏 */}
+                            <div className="flex items-center gap-4 bg-white p-2.5 rounded-[2rem] shadow-md border border-white/50">
+                                <button 
+                                    onClick={() => setAllowRepeating(!allowRepeating)} 
+                                    className={`px-8 py-4 rounded-2xl text-[1.8vh] font-black transition-all ${allowRepeating ? 'bg-blue-500 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-50'}`}
+                                >
+                                    {allowRepeating ? '🔁 允许重复抽取' : '🎯 单次不重复'}
+                                </button>
+                                <div className="w-px h-8 bg-slate-100"></div>
+                                <button 
+                                    onClick={() => {setPool([...students]); setCurrentName('准备就绪'); setHistory([]);}} 
+                                    className="px-8 py-4 rounded-2xl text-[1.8vh] font-black text-slate-500 hover:bg-slate-50 flex items-center gap-2 active-scale transition-all"
+                                >
+                                    <Icon name="RotateCcw" size={20} /> 重置进度
+                                </button>
+                            </div>
+                        </div>
+                    </main>
+
+                    {/* History Area: 底部占约 12vh */}
+                    <footer className="w-full max-w-6xl h-[12vh] px-4">
+                        <div className="flex items-center gap-2 mb-2 text-slate-400 font-black text-[1.4vh]">
+                            <Icon name="History" className="text-blue-300" size={16} /> 最近幸运榜单
+                        </div>
+                        <div className="flex gap-3 overflow-x-auto pb-2 no-scrollbar">
+                            {history.length === 0 ? (
+                                <div className="w-full text-center py-4 border-2 border-dashed border-slate-100 rounded-2xl text-slate-200 text-xs font-bold uppercase tracking-widest">还没有抽取记录</div>
+                            ) : history.map((name, i) => (
+                                <div key={i} className="flex-shrink-0 px-7 py-3.5 bg-white rounded-2xl text-[1.8vh] font-black text-slate-700 shadow-sm border-b-4 border-blue-50 hover:translate-y-[-2px] transition-transform">{name}</div>
+                            ))}
+                        </div>
+                    </footer>
+
+                    {/* Modals - 名单管理弹窗 */}
+                    {showSettings && (
+                        <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-lg flex justify-center items-center p-6">
+                            <div className="bg-white w-full max-w-2xl rounded-[3rem] shadow-2xl flex flex-col max-h-[85vh] overflow-hidden">
+                                <div className="p-8 border-b border-slate-50 flex justify-between items-center bg-slate-50/30">
+                                    <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">学生名单库</h2>
+                                    <button onClick={() => setShowSettings(false)} className="p-3 hover:bg-white rounded-2xl shadow-sm active-scale"><Icon name="X" /></button>
+                                </div>
+                                <div className="p-8 overflow-y-auto flex-1 space-y-8">
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        <div className="relative group h-40 border-3 border-dashed border-slate-200 rounded-[2rem] flex flex-col items-center justify-center gap-3 hover:border-blue-400 hover:bg-blue-50 transition-all">
+                                            <input ref={fileInputRef} type="file" onChange={handleFileUpload} accept=".xlsx, .xls" className="absolute inset-0 opacity-0 cursor-pointer z-10" />
+                                            <div className="p-3 bg-blue-100 text-blue-600 rounded-2xl"><Icon name="Upload" /></div>
+                                            <span className="text-sm font-black text-slate-500">点此快速导入 Excel</span>
+                                        </div>
+                                        <div className="bg-orange-50/50 rounded-[2rem] p-6 text-sm text-orange-700 border border-orange-100">
+                                            <p className="font-black mb-2">💡 贴心提示：</p>
+                                            <ul className="space-y-1 opacity-80 font-bold">
+                                                <li>• 智能匹配“姓名”列</li>
+                                                <li>• 每行一个姓名手动录入</li>
+                                                <li>• 刷新浏览器名单不丢失</li>
+                                            </ul>
+                                        </div>
+                                    </div>
+                                    <textarea className="w-full h-56 bg-slate-50 border-none rounded-[2rem] p-6 focus:ring-4 focus:ring-blue-100 transition-all font-bold text-base text-slate-700 resize-none" placeholder="输入姓名，每行一人..." value={rawInput} onChange={(e) => setRawInput(e.target.value)}></textarea>
+                                </div>
+                                <div className="p-8 border-t border-slate-50 flex justify-end gap-4">
+                                    <button onClick={() => {setStudents([]); setRawInput('');}} className="px-6 py-3 text-red-400 font-black hover:bg-red-50 rounded-2xl transition-all">清空重来</button>
+                                    <button onClick={() => { const list = rawInput.split('\n').map(n => n.trim()).filter(n => n); setStudents(list); setPool(list); setShowSettings(false); }} className="px-10 py-4 bg-blue-500 text-white font-black rounded-2xl hover:bg-blue-600 shadow-xl transition-all active-scale">保存名单</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* 冲突确认弹窗 */}
+                    {showOverwriteConfirm && (
+                        <div className="fixed inset-0 z-[70] bg-slate-900/60 backdrop-blur-md flex justify-center items-center p-6 text-center">
+                            <div className="bg-white w-full max-w-sm rounded-[3rem] shadow-2xl p-10">
+                                <div className="w-20 h-20 bg-blue-100 text-blue-600 rounded-[2rem] flex items-center justify-center mx-auto mb-8 shadow-inner"><Icon name="RefreshCw" size={36} /></div>
+                                <h3 className="text-2xl font-black mb-3">更新名单</h3>
+                                <p className="text-slate-500 font-bold mb-10 leading-relaxed">检测到导入了 {pendingList.length} 条名单，您希望如何处理？</p>
+                                <div className="grid gap-4">
+                                    <button onClick={() => executeApplyList(pendingList, 'overwrite')} className="py-4 bg-blue-500 text-white font-black rounded-2xl hover:bg-blue-600 shadow-lg active-scale">全部替换</button>
+                                    <button onClick={() => executeApplyList(pendingList, 'append')} className="py-4 bg-slate-100 text-slate-700 font-black rounded-2xl hover:bg-slate-200 active-scale">在末尾追加</button>
+                                    <button onClick={() => {setShowOverwriteConfirm(false); if(fileInputRef.current) fileInputRef.current.value = '';}} className="py-2 text-slate-400 font-bold hover:text-slate-600">取消导入</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* 列选择器 */}
+                    {showColumnPicker && (
+                        <div className="fixed inset-0 z-[60] bg-slate-950 flex flex-col p-6 md:p-12 overflow-hidden">
+                            <div className="max-w-5xl mx-auto w-full flex-1 flex flex-col h-full">
+                                <div className="mb-10 text-center text-white">
+                                    <div className="inline-flex p-4 bg-blue-500 rounded-3xl mb-4"><Icon name="AlertCircle" size={40} /></div>
+                                    <h2 className="text-3xl font-black mb-3">请指出姓名所在的列</h2>
+                                    <p className="text-slate-400 font-bold">点选对应标题上方的蓝色按钮</p>
+                                </div>
+                                <div className="flex-1 bg-white rounded-[3rem] overflow-hidden shadow-2xl flex flex-col">
+                                    <div className="overflow-x-auto flex-1">
+                                        <table className="w-full border-collapse">
+                                            <thead className="sticky top-0 bg-white z-10">
+                                                <tr className="bg-slate-50">
+                                                    {excelPreview.headers.map((h, i) => (
+                                                        <th key={i} className="p-6 border-b border-slate-100">
+                                                            <button onClick={() => { const list = excelPreview.fullData.slice(1).map(r => r[i]).filter(Boolean).map(String); setShowColumnPicker(false); requestUpdateList(list); }} className="w-full py-3 bg-blue-500 text-white text-sm font-black rounded-2xl shadow-md active-scale">选此列</button>
+                                                        </th>
+                                                    ))}
+                                                </tr>
+                                                <tr>{excelPreview.headers.map((h, i) => ( <th key={i} className="p-6 text-left text-slate-400 text-xs font-black border-b border-slate-50 uppercase tracking-widest">{h || '未命名'}</th> ))}</tr>
+                                            </thead>
+                                            <tbody>
+                                                {excelPreview.rows.map((row, ri) => (
+                                                    <tr key={ri}>{row.map((cell, ci) => ( <td key={ci} className="p-6 text-slate-600 text-sm font-bold border-b border-slate-50">{cell}</td> ))}</tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                    <div className="p-6 bg-slate-50 border-t flex justify-center">
+                                        <button onClick={() => {setShowColumnPicker(false); if(fileInputRef.current) fileInputRef.current.value = '';}} className="px-10 py-3 bg-slate-800 text-white rounded-2xl font-black">取消</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
